@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: new-app-nti
+  labels:
+    app: new-app-nti
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: new-app-nti
+  template:
+    metadata:
+      labels:
+        app: new-app-nti
+    spec:
+      containers:
+        - name: new-app-nti
+          # Replaced at runtime by the Jenkins pipeline via sed on IMAGE_PLACEHOLDER
+          image: IMAGE_PLACEHOLDER
+          # Always pull so each new BUILD_NUMBER tag is picked up from Docker Hub
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
