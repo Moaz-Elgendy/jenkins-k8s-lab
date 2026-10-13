@@ -24,7 +24,7 @@ pipeline {
         )
         string(
             name: 'KUBECONFIG_PATH',
-            defaultValue: '/home/jenkins/.kube/config',
+            defaultValue: '/var/jenkins_home/.kube/config',
             description: 'Path to the kubeconfig inside the Jenkins agent that points at minikube'
         )
     }

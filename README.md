@@ -64,25 +64,83 @@ The Jenkins agent is a container (`strange_babbage`, `jenkins/jenkins:lts`). Ver
 3. **The agent cannot reach the apiserver even with a kubeconfig.** The agent sits on the docker `bridge` network (`172.17.0.2`); minikube sits on its own `minikube` network (`192.168.49.2`). `curl https://192.168.49.2:8443` from the agent returns HTTP 000.
 4. **The apiserver is bound to host loopback only** — `8443/tcp -> 127.0.0.1:32771` — so the host gateway route is closed as well.
 
-### Fix options
+### Step 1 — Join the agent to the minikube network
 
-**A. Join the agent to the minikube network** (minimal, no container recreate)
+The agent and minikube are on separate docker networks, so the agent cannot route to the apiserver at all. No container recreate needed:
 
 ```bash
 docker network connect minikube strange_babbage
-docker exec strange_babbage apt-get update && \
-docker exec strange_babbage apt-get install -y curl
-# then test:
-docker exec strange_babbage curl -sk https://192.168.49.2:8443
+docker exec -u root strange_babbage apt-get update
+docker exec -u root strange_babbage apt-get install -y curl
+# verify: should print HTTP 403 (TLS ok, unauthenticated request rejected)
+docker exec -u root strange_babbage curl -sk -o /dev/null -w '%{http_code}\n' https://192.168.49.2:8443
 ```
 
-Then generate a kubeconfig whose `server:` is `https://192.168.49.2:8443` (rewrite `127.0.0.1:32771`) and add it as a Jenkins **Secret File** credential, or copy it into the agent.
+### Step 2 — Install kubectl in the agent
 
-**B. Use `minikube tunnel`** — publishes the apiserver on the host, still needs the binary in the agent.
+```bash
+docker exec -u root strange_babbage apt-get install -y kubectl
+# if the distro repo is too old, copy the host binary instead:
+#   docker cp /usr/bin/kubectl strange_babbage:/usr/local/bin/kubectl
+docker exec strange_babbage kubectl version --client
+```
 
-**C. Move the deploy off the agent** — run the deploy from the workstation; simplest, but the pipeline is no longer self-contained.
+### Step 3 — Add the kubeconfig as a Jenkins Secret File credential
 
-> Note: the guide's Step 3 says to import the kubeconfig as a Jenkins Secret File credential. That is necessary either way, but on its own it is **not sufficient** here — the network reachability issue (item 3) has to be solved too.
+A ready-to-use kubeconfig already exists at:
+
+```
+/home/moaz/.kube/jenkins-kubeconfig   (mode 600, not in git)
+```
+
+It embeds the minikube client certificate inline (`certificate-authority-data`,
+`client-certificate-data`, `client-key-data`) instead of referencing host file paths, so it is
+self-contained inside the container. Its `server:` is already rewritten to
+`https://192.168.49.2:8443`.
+
+In Jenkins: **Manage Jenkins → Credentials → System → Global credentials → Add Credentials**
+
+| Field | Value |
+|---|---|
+| Kind | Secret file |
+| Scope | Global |
+| ID | `minikube-kubeconfig` |
+| File | paste the contents of `/home/moaz/.kube/jenkins-kubeconfig` |
+
+> The embedded identity is `CN=minikube-user`, `O=system:masters` — i.e. **cluster-admin**.
+> That is what the lab guide asks for (Step 3: import the minikube kubeconfig). Acceptable on a
+> local single-user minikube; do not reuse this pattern against a shared or production cluster.
+> The file is a private key, so it stays outside the git working tree on purpose — never commit it.
+
+### Step 4 — Set `KUBECONFIG_PATH`
+
+If you used the Secret File credential, the pipeline needs to consume it. The current `Jenkinsfile`
+reads a plain path, so either copy the secret into the agent at a fixed path:
+
+```bash
+docker cp /home/moaz/.kube/jenkins-kubeconfig strange_babbage:/var/jenkins_home/.kube/config
+docker exec strange_babbage mkdir -p /var/jenkins_home/.kube
+docker exec -u root strange_babbage chown -R jenkins:jenkins /var/jenkins_home/.kube
+docker exec strange_babbage ls -l /var/jenkins_home/.kube/config
+```
+
+then leave `KUBECONFIG_PATH` at its default `/home/jenkins/.kube/config`... note that the agent's
+`$HOME` is `/var/jenkins_home`, so set the parameter to `/var/jenkins_home/.kube/config`.
+
+Or switch the `Deploy to Kubernetes` and `Verify Deployment` stages to read the credential directly:
+
+```groovy
+withCredentials([file(credentialsId: 'minikube-kubeconfig', variable: 'KUBECONFIG')]) {
+    sh "kubectl --kubeconfig=\"${KUBECONFIG}\" apply -f rendered-deployment.yaml"
+}
+```
+
+### Alternative fixes
+
+**`minikube tunnel`** — publishes the apiserver on the host; still needs kubectl in the agent.
+
+**Move the deploy off the agent** — run deploy from the workstation; simplest, but the pipeline is no
+longer self-contained.
 
 ## Verify manually
 
