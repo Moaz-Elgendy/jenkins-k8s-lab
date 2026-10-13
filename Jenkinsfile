@@ -45,9 +45,10 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                sh """
-                    docker build -t ${APP_NAME}:${BUILD_NUMBER} .
-                """
+                sh '''
+                    set -eu
+                    docker build -t "$APP_NAME:$BUILD_NUMBER" .
+                '''
             }
         }
 
@@ -58,13 +59,16 @@ pipeline {
                     usernameVariable: 'DOCKER_USERNAME',
                     passwordVariable: 'DOCKER_PASSWORD'
                 )]) {
-                    sh """
-                        set -eu
-                        echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USERNAME}" --password-stdin
-
-                        docker tag ${APP_NAME}:${BUILD_NUMBER} ${DOCKER_USERNAME}/${APP_NAME}:${BUILD_NUMBER}
-                        docker push ${DOCKER_USERNAME}/${APP_NAME}:${BUILD_NUMBER}
-                    """
+                    withEnv([
+                        "IMAGE=${DOCKER_USERNAME}/${APP_NAME}:${BUILD_NUMBER}"
+                    ]) {
+                        sh '''
+                            set -eu
+                            echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+                            docker tag "$APP_NAME:$BUILD_NUMBER" "$IMAGE"
+                            docker push "$IMAGE"
+                        '''
+                    }
                 }
             }
         }
@@ -76,67 +80,75 @@ pipeline {
                     usernameVariable: 'DOCKER_USERNAME',
                     passwordVariable: 'DOCKER_PASSWORD'
                 )]) {
-                    sh """
-                        set -eu
-                        test -f ${DEPLOY_DIR}/deployment.yaml || { echo "missing ${DEPLOY_DIR}/deployment.yaml"; exit 1; }
-                        test -f ${DEPLOY_DIR}/service.yaml     || { echo "missing ${DEPLOY_DIR}/service.yaml"; exit 1; }
+                    withEnv([
+                        "IMAGE=${DOCKER_USERNAME}/${APP_NAME}:${BUILD_NUMBER}"
+                    ]) {
+                        sh '''
+                            set -eu
+                            test -f "$DEPLOY_DIR/deployment.yaml" || { echo "missing $DEPLOY_DIR/deployment.yaml"; exit 1; }
+                            test -f "$DEPLOY_DIR/service.yaml"     || { echo "missing $DEPLOY_DIR/service.yaml"; exit 1; }
 
-                        sed 's|IMAGE_PLACEHOLDER|${DOCKER_USERNAME}/${APP_NAME}:${BUILD_NUMBER}|' \
-                            ${DEPLOY_DIR}/deployment.yaml > rendered-deployment.yaml
+                            sed "s|IMAGE_PLACEHOLDER|$IMAGE|" "$DEPLOY_DIR/deployment.yaml" > rendered-deployment.yaml
 
-                        grep -q 'IMAGE_PLACEHOLDER' rendered-deployment.yaml && { echo "placeholder was not substituted"; exit 1; }
-                        echo "rendered image: $(grep image: rendered-deployment.yaml)"
-                    """
+                            if grep -q IMAGE_PLACEHOLDER rendered-deployment.yaml; then
+                                echo "placeholder was not substituted"; exit 1
+                            fi
+                            echo "rendered image:"
+                            grep image: rendered-deployment.yaml
+                        '''
+                    }
                 }
             }
         }
 
         stage('Deploy to Kubernetes') {
             steps {
-                sh """
-                    set -eu
+                withEnv(["KUBECONFIG=${params.KUBECONFIG_PATH}"]) {
+                    sh '''
+                        set -eu
 
-                    command -v kubectl >/dev/null || { echo "kubectl not found on the agent"; exit 1; }
-                    test -r "${params.KUBECONFIG_PATH}" || { echo "kubeconfig not readable at ${params.KUBECONFIG_PATH}"; exit 1; }
+                        command -v kubectl >/dev/null || { echo "kubectl not found on the agent"; exit 1; }
+                        test -r "$KUBECONFIG" || { echo "kubeconfig not readable at $KUBECONFIG"; exit 1; }
 
-                    export KUBECONFIG="${params.KUBECONFIG_PATH}"
-                    kubectl config current-context
-
-                    kubectl apply -f rendered-deployment.yaml
-                    kubectl apply -f ${DEPLOY_DIR}/service.yaml
-                """
+                        kubectl config current-context
+                        kubectl apply -f rendered-deployment.yaml
+                        kubectl apply -f "$DEPLOY_DIR/service.yaml"
+                    '''
+                }
             }
         }
 
         stage('Verify Deployment') {
             steps {
-                sh """
-                    set -eu
-                    export KUBECONFIG="${params.KUBECONFIG_PATH}"
+                withEnv(["KUBECONFIG=${params.KUBECONFIG_PATH}"]) {
+                    sh '''
+                        set -eu
 
-                    kubectl rollout status deployment/${DEPLOYMENT} --timeout=180s
+                        kubectl rollout status "deployment/$DEPLOYMENT" --timeout=180s
 
-                    echo "--- pods ---"
-                    kubectl get pods -l app=${APP_NAME} -o wide
+                        echo "--- pods ---"
+                        kubectl get pods -l "app=$APP_NAME" -o wide
 
-                    echo "--- services ---"
-                    kubectl get svc ${SERVICE}
+                        echo "--- services ---"
+                        kubectl get svc "$SERVICE"
 
-                    IP=\$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
-                    echo "node: \${IP}"
-                    echo "app:   http://\${IP}:30080/"
-                """
+                        IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+                        echo "node: $IP"
+                        echo "app:   http://$IP:30080/"
+                    '''
+                }
             }
         }
     }
 
     post {
         failure {
-            sh """
-                export KUBECONFIG="${params.KUBECONFIG_PATH}"
-                kubectl get pods -l app=${APP_NAME} -o wide 2>/dev/null || true
-                kubectl describe deployment ${DEPLOYMENT} 2>/dev/null | tail -30 || true
-            """
+            withEnv(["KUBECONFIG=${params.KUBECONFIG_PATH}"]) {
+                sh '''
+                    kubectl get pods -l "app=$APP_NAME" -o wide 2>/dev/null || true
+                    kubectl describe deployment "$DEPLOYMENT" 2>/dev/null | tail -30 || true
+                '''
+            }
         }
     }
 }
